@@ -13,7 +13,7 @@ LONG_DESCRIPTION = 'A package that allows to build simple 3d object obj files.'
 
 # Setting up
 setup(
-    name="pythreemaker",
+    name="pythree",
     version=VERSION,
     author="rootjatin (Jatin Sharma)",
     author_email="<jatin100198@gmail.com>",
