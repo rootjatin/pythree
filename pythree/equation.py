@@ -6,7 +6,6 @@ import math
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-# Change this import if you rename sphere.py -> something else (e.g., core.py)
 from .sphere import Mesh  # type: ignore
 
 Vec3 = Tuple[float, float, float]
@@ -19,77 +18,159 @@ Tri = Tuple[int, int, int]
 
 _ALLOWED_FUNCS: Dict[str, Callable[..., float]] = {
     # trig
-    "sin": math.sin, "cos": math.cos, "tan": math.tan,
-    "asin": math.asin, "acos": math.acos, "atan": math.atan, "atan2": math.atan2,
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "asin": math.asin,
+    "acos": math.acos,
+    "atan": math.atan,
+    "atan2": math.atan2,
     # exp/log/pow
-    "sqrt": math.sqrt, "exp": math.exp, "log": math.log, "log10": math.log10,
+    "sqrt": math.sqrt,
+    "exp": math.exp,
+    "log": math.log,
+    "log10": math.log10,
     "pow": pow,
     # misc
     "abs": abs,
-    "floor": math.floor, "ceil": math.ceil,
-    "min": min, "max": max,
+    "floor": math.floor,
+    "ceil": math.ceil,
+    "min": min,
+    "max": max,
 }
 
 _ALLOWED_CONSTS: Dict[str, float] = {
     "pi": math.pi,
     "e": math.e,
-    "tau": math.tau if hasattr(math, "tau") else 2 * math.pi,
+    "tau": getattr(math, "tau", 2 * math.pi),
 }
 
-_ALLOWED_NODES = (
+# NOTE: ast.Load is required for modern Python AST traversal
+_ALLOWED_NODE_TYPES = (
     ast.Expression,
-    ast.BinOp, ast.UnaryOp,
-    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Mod, ast.Pow,
-    ast.USub, ast.UAdd,
+    ast.BinOp,
+    ast.UnaryOp,
+    ast.Add,
+    ast.Sub,
+    ast.Mult,
+    ast.Div,
+    ast.Mod,
+    ast.Pow,
+    ast.USub,
+    ast.UAdd,
     ast.Call,
     ast.Name,
+    ast.Load,
     ast.Constant,  # py3.8+
 )
 
 
-def compile_math_expr(expr: str, *, vars: Sequence[str]) -> Callable[..., float]:
+class _MathExprValidator(ast.NodeVisitor):
+    def __init__(self, allowed_vars: Sequence[str]) -> None:
+        self.allowed_vars = set(allowed_vars)
+
+    def generic_visit(self, node: ast.AST) -> None:
+        if not isinstance(node, _ALLOWED_NODE_TYPES):
+            raise ValueError(f"Disallowed syntax: {type(node).__name__}")
+        super().generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        # Only allow f(x) where f is a simple name in _ALLOWED_FUNCS
+        if not isinstance(node.func, ast.Name):
+            raise ValueError("Only simple function calls are allowed (e.g., sin(x))")
+        if node.func.id not in _ALLOWED_FUNCS:
+            raise ValueError(f"Function not allowed: {node.func.id}")
+        if node.keywords:
+            raise ValueError("Keyword arguments are not allowed in function calls")
+        self.generic_visit(node)
+
+    def visit_Name(self, node: ast.Name) -> None:
+        ident = node.id
+        if (
+            ident not in self.allowed_vars
+            and ident not in _ALLOWED_FUNCS
+            and ident not in _ALLOWED_CONSTS
+        ):
+            raise ValueError(f"Name not allowed: {ident}")
+        self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> None:
+        # Only allow numeric constants
+        if not isinstance(node.value, (int, float)):
+            raise ValueError(f"Only numeric constants are allowed (got {type(node.value).__name__})")
+        self.generic_visit(node)
+
+
+@dataclass(frozen=True)
+class CompiledMathExpr:
     """
-    Compile a restricted math expression like "sin(x) + y*y" into a function.
+    A validated expression compiled into a lambda for fast repeated evaluation.
+    Supports positional calls in the declared var order, and keyword calls.
+    """
+    expr: str
+    vars: Tuple[str, ...]
+    _fn: Callable[..., float]
+
+    def __call__(self, *args: float, **kwargs: float) -> float:
+        if args and kwargs:
+            raise TypeError("Use either positional args OR keyword args, not both")
+
+        if kwargs:
+            try:
+                args = tuple(float(kwargs[name]) for name in self.vars)
+            except KeyError as e:
+                raise TypeError(f"Missing variable: {e.args[0]}") from None
+        else:
+            if len(args) != len(self.vars):
+                raise TypeError(f"Expected {len(self.vars)} args ({', '.join(self.vars)}), got {len(args)}")
+            args = tuple(float(a) for a in args)
+
+        return float(self._fn(*args))
+
+
+def compile_math_expr(expr: str, *, vars: Sequence[str]) -> CompiledMathExpr:
+    """
+    Compile a restricted math expression into a callable.
+
     Allowed:
-      - numbers, + - * / % **, parentheses
+      - numeric literals, + - * / % **, parentheses
       - variables in `vars`
       - functions in _ALLOWED_FUNCS
       - constants pi, e, tau
+
     Disallowed:
       - attribute access, indexing, comprehensions, lambdas, imports, etc.
+      - keyword arguments in calls
+      - non-numeric constants (strings, None, etc.)
     """
     tree = ast.parse(expr, mode="eval")
+    _MathExprValidator(vars).visit(tree)
 
-    def _check(node: ast.AST) -> None:
-        if not isinstance(node, _ALLOWED_NODES):
-            raise ValueError(f"Disallowed syntax: {type(node).__name__}")
+    # Compile to a lambda for speed (avoids per-sample eval + dict creation).
+    arglist = ", ".join(vars)
+    src = f"lambda {arglist}: ({expr})"
 
-        # Disallow things not in the node whitelist even if they appear as subnodes
-        for child in ast.iter_child_nodes(node):
-            _check(child)
+    base_scope: Dict[str, object] = {"__builtins__": {}}
+    base_scope.update(_ALLOWED_FUNCS)
+    base_scope.update(_ALLOWED_CONSTS)
 
-        if isinstance(node, ast.Call):
-            if not isinstance(node.func, ast.Name):
-                raise ValueError("Only simple function calls are allowed (e.g., sin(x))")
-            if node.func.id not in _ALLOWED_FUNCS:
-                raise ValueError(f"Function not allowed: {node.func.id}")
+    fn = eval(src, base_scope, {})  # safe because AST is validated + builtins removed
+    return CompiledMathExpr(expr=expr, vars=tuple(vars), _fn=fn)
 
-        if isinstance(node, ast.Name):
-            if node.id not in vars and node.id not in _ALLOWED_FUNCS and node.id not in _ALLOWED_CONSTS:
-                raise ValueError(f"Name not allowed: {node.id}")
 
-    _check(tree)
+# -------------------------
+# Helpers
+# -------------------------
 
-    code = compile(tree, "<math_expr>", "eval")
+def _require_segments(name: str, n: int) -> None:
+    if n < 1:
+        raise ValueError(f"{name} must be >= 1 (got {n})")
 
-    def _fn(**kwargs: float) -> float:
-        scope = {"__builtins__": {}}
-        scope.update(_ALLOWED_FUNCS)
-        scope.update(_ALLOWED_CONSTS)
-        scope.update(kwargs)
-        return float(eval(code, scope, {}))  # safe because AST is restricted
 
-    return _fn
+def _linspace(a: float, b: float, segments: int) -> List[float]:
+    # segments = number of intervals; points = segments + 1
+    step = (b - a) / segments
+    return [a + i * step for i in range(segments + 1)]
 
 
 # -------------------------
@@ -105,27 +186,30 @@ def mesh_from_heightfield(
     y_segments: int = 100,
     name: str = "heightfield",
 ) -> Mesh:
+    _require_segments("x_segments", x_segments)
+    _require_segments("y_segments", y_segments)
+
     f = compile_math_expr(expr, vars=("x", "y"))
 
     xs0, xs1 = x_range
     ys0, ys1 = y_range
+    xs = _linspace(xs0, xs1, x_segments)
+    ys = _linspace(ys0, ys1, y_segments)
 
     verts: List[Vec3] = []
     faces: List[Tri] = []
 
-    for iy in range(y_segments + 1):
-        ty = iy / y_segments
-        y = ys0 + ty * (ys1 - ys0)
-        for ix in range(x_segments + 1):
-            tx = ix / x_segments
-            x = xs0 + tx * (xs1 - xs0)
-            z = f(x=x, y=y)
-            verts.append((x, y, z))
+    row_stride = x_segments + 1
+
+    for iy, y in enumerate(ys):
+        row_base = iy * row_stride
+        for ix, x in enumerate(xs):
+            verts.append((x, y, f(x, y)))
 
             if ix < x_segments and iy < y_segments:
-                a = iy * (x_segments + 1) + ix
+                a = row_base + ix
                 b = a + 1
-                c = (iy + 1) * (x_segments + 1) + ix
+                c = a + row_stride
                 d = c + 1
                 faces.append((a, c, b))
                 faces.append((b, c, d))
@@ -150,6 +234,9 @@ def mesh_from_parametric(
     wrap_v: bool = False,
     name: str = "parametric",
 ) -> Mesh:
+    _require_segments("u_segments", u_segments)
+    _require_segments("v_segments", v_segments)
+
     fx = compile_math_expr(x_expr, vars=("u", "v"))
     fy = compile_math_expr(y_expr, vars=("u", "v"))
     fz = compile_math_expr(z_expr, vars=("u", "v"))
@@ -160,16 +247,16 @@ def mesh_from_parametric(
     ucount = u_segments + (0 if wrap_u else 1)
     vcount = v_segments + (0 if wrap_v else 1)
 
+    # Build parameter samples (note: if wrapping, last seam point is omitted)
+    us = [u0 + (u1 - u0) * (i / u_segments) for i in range(ucount)]
+    vs = [v0 + (v1 - v0) * (j / v_segments) for j in range(vcount)]
+
     verts: List[Vec3] = []
     faces: List[Tri] = []
 
-    for i in range(ucount):
-        tu = i / u_segments
-        u = u0 + tu * (u1 - u0)
-        for j in range(vcount):
-            tv = j / v_segments
-            v = v0 + tv * (v1 - v0)
-            verts.append((fx(u=u, v=v), fy(u=u, v=v), fz(u=u, v=v)))
+    for u in us:
+        for v in vs:
+            verts.append((fx(u, v), fy(u, v), fz(u, v)))
 
     def idx(i: int, j: int) -> int:
         ii = (i % u_segments) if wrap_u else i
@@ -195,13 +282,16 @@ def mesh_from_parametric(
 def _lerp(a: float, b: float, t: float) -> float:
     return a + (b - a) * t
 
+
 def _interp(p0: Vec3, p1: Vec3, v0: float, v1: float, iso: float) -> Vec3:
-    dv = (v1 - v0)
-    if abs(dv) < 1e-12:
-        t = 0.5
-    else:
-        t = (iso - v0) / dv
-    return (_lerp(p0[0], p1[0], t), _lerp(p0[1], p1[1], t), _lerp(p0[2], p1[2], t))
+    dv = v1 - v0
+    t = 0.5 if abs(dv) < 1e-12 else (iso - v0) / dv
+    return (
+        _lerp(p0[0], p1[0], t),
+        _lerp(p0[1], p1[1], t),
+        _lerp(p0[2], p1[2], t),
+    )
+
 
 def mesh_from_implicit(
     expr: str,
@@ -214,8 +304,11 @@ def mesh_from_implicit(
 ) -> Mesh:
     """
     Build an iso-surface mesh for f(x,y,z) = iso using marching tetrahedra.
-    - Higher resolution => smoother but slower.
-    - bounds should fully contain your surface.
+
+    Tips:
+      - Higher resolution => smoother but slower.
+      - bounds should fully contain your surface.
+      - weld_eps controls vertex welding during polygonization (None disables).
     """
     f = compile_math_expr(expr, vars=("x", "y", "z"))
 
@@ -224,21 +317,30 @@ def mesh_from_implicit(
     if nx < 2 or ny < 2 or nz < 2:
         raise ValueError("resolution must be at least (2,2,2)")
 
-    # Sample grid values
     xs = [xmin + (xmax - xmin) * (i / (nx - 1)) for i in range(nx)]
     ys = [ymin + (ymax - ymin) * (j / (ny - 1)) for j in range(ny)]
     zs = [zmin + (zmax - zmin) * (k / (nz - 1)) for k in range(nz)]
 
-    vals = [[[0.0 for _ in range(nz)] for _ in range(ny)] for _ in range(nx)]
+    # Flattened scalar field: index = (i*ny + j)*nz + k
+    def vidx(i: int, j: int, k: int) -> int:
+        return (i * ny + j) * nz + k
+
+    vals = [0.0] * (nx * ny * nz)
     for i, x in enumerate(xs):
         for j, y in enumerate(ys):
+            base = (i * ny + j) * nz
             for k, z in enumerate(zs):
-                vals[i][j][k] = f(x=x, y=y, z=z)
+                vals[base + k] = f(x, y, z)
 
-    # cube corner offsets (0..7)
     corner_off = [
-        (0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0),
-        (0, 0, 1), (1, 0, 1), (1, 1, 1), (0, 1, 1),
+        (0, 0, 0),
+        (1, 0, 0),
+        (1, 1, 0),
+        (0, 1, 0),
+        (0, 0, 1),
+        (1, 0, 1),
+        (1, 1, 1),
+        (0, 1, 1),
     ]
 
     # Split cube into 6 tetrahedra along diagonal (0 -> 6)
@@ -258,45 +360,43 @@ def mesh_from_implicit(
         verts.append(p)
         return len(verts) - 1
 
-    # For optional welding without calling mesh.weld later:
     cache: Dict[Tuple[int, int, int], int] = {}
 
     def add_v_cached(p: Vec3) -> int:
         if weld_eps is None:
             return add_v(p)
-        k = (round(p[0] / weld_eps), round(p[1] / weld_eps), round(p[2] / weld_eps))
-        hit = cache.get(k)
+        eps = weld_eps
+        key = (round(p[0] / eps), round(p[1] / eps), round(p[2] / eps))
+        hit = cache.get(key)
         if hit is not None:
             return hit
         i = add_v(p)
-        cache[k] = i
+        cache[key] = i
         return i
 
     for i in range(nx - 1):
         for j in range(ny - 1):
             for k in range(nz - 1):
-                # positions + scalar values at 8 cube corners
+                # Gather cube corners
                 P: List[Vec3] = []
                 V: List[float] = []
-                for (dx, dy, dz) in corner_off:
-                    x = xs[i + dx]
-                    y = ys[j + dy]
-                    z = zs[k + dz]
-                    P.append((x, y, z))
-                    V.append(vals[i + dx][j + dy][k + dz])
+                for dx, dy, dz in corner_off:
+                    ii, jj, kk = i + dx, j + dy, k + dz
+                    P.append((xs[ii], ys[jj], zs[kk]))
+                    V.append(vals[vidx(ii, jj, kk)])
 
-                # polygonize each tetra
-                for (a, b, c, d) in tets:
-                    ids = [a, b, c, d]
-                    pv = [P[t] for t in ids]
-                    sv = [V[t] for t in ids]
-                    inside = [sv[q] < iso for q in range(4)]
-                    n_in = sum(1 for x in inside if x)
+                # Polygonize each tetrahedron
+                for a, b, c, d in tets:
+                    ids = (a, b, c, d)
+                    pv = (P[ids[0]], P[ids[1]], P[ids[2]], P[ids[3]])
+                    sv = (V[ids[0]], V[ids[1]], V[ids[2]], V[ids[3]])
+
+                    inside = (sv[0] < iso, sv[1] < iso, sv[2] < iso, sv[3] < iso)
+                    n_in = int(inside[0]) + int(inside[1]) + int(inside[2]) + int(inside[3])
 
                     if n_in == 0 or n_in == 4:
                         continue
 
-                    # helper lists
                     in_idx = [q for q in range(4) if inside[q]]
                     out_idx = [q for q in range(4) if not inside[q]]
 
@@ -312,7 +412,6 @@ def mesh_from_implicit(
                         faces.append((i0, i1, i2))
 
                     elif n_in == 3:
-                        # 1 outside => triangle too, flip orientation
                         vo = out_idx[0]
                         i0, i1, i2 = in_idx
                         p0 = _interp(pv[vo], pv[i0], sv[vo], sv[i0], iso)
@@ -321,7 +420,7 @@ def mesh_from_implicit(
                         a0 = add_v_cached(p0)
                         a1 = add_v_cached(p1)
                         a2 = add_v_cached(p2)
-                        faces.append((a0, a2, a1))
+                        faces.append((a0, a2, a1))  # flipped orientation
 
                     else:
                         # n_in == 2 => quad => 2 triangles
