@@ -25,12 +25,15 @@ Python package for making geometric shapes obj file and for 3d plotting and 3d o
 ```bash
 pip install pythree
 ```
-From source
+### From source
+```
 git clone https://github.com/rootjatin/pythree.git
 cd pythree
 pip install -e .
-
+```
+```
 import pythree
 print(dir(pythree))
 help(pythree)
+```
 
