@@ -36,4 +36,15 @@ import pythree
 print(dir(pythree))
 help(pythree)
 ```
+### From Equations
+```
+bounds = ((-1.3, -1.3, -1.3), (1.3, 1.3, 1.3))
+mesh = mesh_from_implicit_cell_size(
+    "x*x + y*y + z*z - 1",
+    bounds=bounds,
+    cell_size=0.03,      # smaller = higher resolution
+    max_resolution=220,  # safety clamp (prevents accidental huge grids)
+)
+```
+
 
