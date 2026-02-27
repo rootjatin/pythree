@@ -46,5 +46,16 @@ mesh = mesh_from_implicit_cell_size(
     max_resolution=220,  # safety clamp (prevents accidental huge grids)
 )
 ```
+#### Heightfied parameter (equations)
+```
+x_segments = segments_from_step((-3, 3), step=0.02)
+y_segments = segments_from_step((-3, 3), step=0.02)
 
-
+mesh = mesh_from_heightfield(
+    "sin(x)*cos(y)",
+    x_range=(-3,3),
+    y_range=(-3,3),
+    x_segments=x_segments,
+    y_segments=y_segments,
+)
+```
