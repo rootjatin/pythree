@@ -36,4 +36,26 @@ import pythree
 print(dir(pythree))
 help(pythree)
 ```
+### From Equations
+```
+bounds = ((-1.3, -1.3, -1.3), (1.3, 1.3, 1.3))
+mesh = mesh_from_implicit_cell_size(
+    "x*x + y*y + z*z - 1",
+    bounds=bounds,
+    cell_size=0.03,      # smaller = higher resolution
+    max_resolution=220,  # safety clamp (prevents accidental huge grids)
+)
+```
+#### Heightfied parameter (equations)
+```
+x_segments = segments_from_step((-3, 3), step=0.02)
+y_segments = segments_from_step((-3, 3), step=0.02)
 
+mesh = mesh_from_heightfield(
+    "sin(x)*cos(y)",
+    x_range=(-3,3),
+    y_range=(-3,3),
+    x_segments=x_segments,
+    y_segments=y_segments,
+)
+```

@@ -12,6 +12,54 @@ Vec3 = Tuple[float, float, float]
 Tri = Tuple[int, int, int]
 
 
+"""
+This module provides utilities to build triangle meshes from math expressions:
+
+1) Heightfield surface:
+      z = f(x, y)
+
+2) Parametric surface:
+      x = fx(u, v)
+      y = fy(u, v)
+      z = fz(u, v)
+
+3) Implicit surface (iso-surface):
+      f(x, y, z) = iso
+
+Expressions are compiled using a strict AST validator so you can accept user input
+without allowing arbitrary Python execution. Only a small set of math functions and
+constants are allowed (see _ALLOWED_FUNCS/_ALLOWED_CONSTS).
+
+------------------------------------------------------------
+Choosing resolution / segments
+------------------------------------------------------------
+
+Mesh quality is driven primarily by sampling density:
+
+- Heightfield: x_segments, y_segments
+- Parametric: u_segments, v_segments
+- Implicit: resolution = (nx, ny, nz) sample points of the scalar field
+
+For implicit surfaces, increasing nx/ny/nz improves detail but cost grows ~O(nx*ny*nz).
+Doubling each axis increases work about 8x.
+
+To make it easier to choose, use:
+    resolution_from_cell_size(bounds, cell_size)
+
+Example:
+    bounds = ((-1.5, -1.5, -1.5), (1.5, 1.5, 1.5))
+    res = resolution_from_cell_size(bounds, cell_size=0.04, max_resolution=160)
+    mesh = mesh_from_implicit(expr, bounds=bounds, resolution=res)
+
+Or simply:
+    mesh = mesh_from_implicit_cell_size(expr, bounds=bounds, cell_size=0.04)
+
+For heightfields/parametric meshes, use:
+    segments_from_step((a,b), step)
+to choose segments such that adjacent samples are about 'step' apart in parameter units.
+"""
+
+
 # -----------------------------
 # Safe math expression compiler
 # -----------------------------
@@ -45,7 +93,6 @@ _ALLOWED_CONSTS: Dict[str, float] = {
     "tau": getattr(math, "tau", 2 * math.pi),
 }
 
-# NOTE: ast.Load is required for modern Python AST traversal
 _ALLOWED_NODE_TYPES = (
     ast.Expression,
     ast.BinOp,
@@ -97,7 +144,9 @@ class _MathExprValidator(ast.NodeVisitor):
     def visit_Constant(self, node: ast.Constant) -> None:
         # Only allow numeric constants
         if not isinstance(node.value, (int, float)):
-            raise ValueError(f"Only numeric constants are allowed (got {type(node.value).__name__})")
+            raise ValueError(
+                f"Only numeric constants are allowed (got {type(node.value).__name__})"
+            )
         self.generic_visit(node)
 
 
@@ -105,8 +154,16 @@ class _MathExprValidator(ast.NodeVisitor):
 class CompiledMathExpr:
     """
     A validated expression compiled into a lambda for fast repeated evaluation.
-    Supports positional calls in the declared var order, and keyword calls.
+
+    - Supports positional calls in the declared var order
+    - Supports keyword calls for clarity
+
+    Example:
+        f = compile_math_expr("sin(x) + y*y", vars=("x", "y"))
+        z1 = f(0.5, 2.0)
+        z2 = f(x=0.5, y=2.0)
     """
+
     expr: str
     vars: Tuple[str, ...]
     _fn: Callable[..., float]
@@ -122,7 +179,9 @@ class CompiledMathExpr:
                 raise TypeError(f"Missing variable: {e.args[0]}") from None
         else:
             if len(args) != len(self.vars):
-                raise TypeError(f"Expected {len(self.vars)} args ({', '.join(self.vars)}), got {len(args)}")
+                raise TypeError(
+                    f"Expected {len(self.vars)} args ({', '.join(self.vars)}), got {len(args)}"
+                )
             args = tuple(float(a) for a in args)
 
         return float(self._fn(*args))
@@ -154,12 +213,75 @@ def compile_math_expr(expr: str, *, vars: Sequence[str]) -> CompiledMathExpr:
     base_scope.update(_ALLOWED_FUNCS)
     base_scope.update(_ALLOWED_CONSTS)
 
-    fn = eval(src, base_scope, {})  # safe because AST is validated + builtins removed
+    fn = eval(src, base_scope, {})  # safe: AST validated + builtins removed
     return CompiledMathExpr(expr=expr, vars=tuple(vars), _fn=fn)
 
 
 # -------------------------
-# Helpers
+# Resolution helper methods
+# -------------------------
+
+def segments_from_step(
+    r: Tuple[float, float],
+    step: float,
+    *,
+    min_segments: int = 4,
+    max_segments: int = 4096,
+) -> int:
+    """
+    Pick a segment count so adjacent samples are about 'step' apart in parameter units.
+
+    Example:
+        x_segments = segments_from_step((-2.0, 2.0), step=0.02)
+    """
+    a, b = r
+    length = abs(b - a)
+    if step <= 0:
+        raise ValueError("step must be > 0")
+    n = int(math.ceil(length / step))
+    n = max(min_segments, n)
+    n = min(max_segments, n)
+    return n
+
+
+def resolution_from_cell_size(
+    bounds: Tuple[Vec3, Vec3],
+    cell_size: float,
+    *,
+    min_resolution: int = 12,
+    max_resolution: int = 256,
+) -> Tuple[int, int, int]:
+    """
+    Pick (nx, ny, nz) for implicit meshing so grid cell edges are roughly 'cell_size'
+    in world-space units.
+
+    - nx/ny/nz are clamped to [min_resolution, max_resolution]
+    - Always returns at least (2,2,2)
+
+    Example:
+        res = resolution_from_cell_size(((-1,-1,-1),(1,1,1)), cell_size=0.03, max_resolution=200)
+    """
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = bounds
+    if cell_size <= 0:
+        raise ValueError("cell_size must be > 0")
+
+    lx = abs(xmax - xmin)
+    ly = abs(ymax - ymin)
+    lz = abs(zmax - zmin)
+
+    nx = int(math.ceil(lx / cell_size)) + 1
+    ny = int(math.ceil(ly / cell_size)) + 1
+    nz = int(math.ceil(lz / cell_size)) + 1
+
+    nx = max(2, min(max_resolution, max(min_resolution, nx)))
+    ny = max(2, min(max_resolution, max(min_resolution, ny)))
+    nz = max(2, min(max_resolution, max(min_resolution, nz)))
+
+    return (nx, ny, nz)
+
+
+# -------------------------
+# Small helpers
 # -------------------------
 
 def _require_segments(name: str, n: int) -> None:
@@ -171,6 +293,10 @@ def _linspace(a: float, b: float, segments: int) -> List[float]:
     # segments = number of intervals; points = segments + 1
     step = (b - a) / segments
     return [a + i * step for i in range(segments + 1)]
+
+
+def _is_finite(x: float) -> bool:
+    return math.isfinite(x) and not math.isnan(x)
 
 
 # -------------------------
@@ -185,7 +311,30 @@ def mesh_from_heightfield(
     x_segments: int = 100,
     y_segments: int = 100,
     name: str = "heightfield",
+    skip_nonfinite: bool = True,
 ) -> Mesh:
+    """
+    Build a triangle mesh for a heightfield z = f(x,y).
+
+    Parameters
+    ----------
+    expr:
+        Math expression using variables x and y.
+        Example: "sin(x) * cos(y)" or "x*x - y*y".
+    x_range, y_range:
+        Sampling ranges for x and y.
+    x_segments, y_segments:
+        Number of intervals along each axis (points = segments + 1).
+        Higher values -> denser mesh.
+    skip_nonfinite:
+        If True, triangles touching NaN/Inf samples are omitted, producing holes
+        instead of exploding geometry.
+
+    Returns
+    -------
+    Mesh:
+        Mesh with computed vertex normals.
+    """
     _require_segments("x_segments", x_segments)
     _require_segments("y_segments", y_segments)
 
@@ -199,20 +348,26 @@ def mesh_from_heightfield(
     verts: List[Vec3] = []
     faces: List[Tri] = []
 
-    row_stride = x_segments + 1
+    # Vertex id grid; -1 means "invalid"
+    vid: List[List[int]] = [[-1] * (x_segments + 1) for _ in range(y_segments + 1)]
 
     for iy, y in enumerate(ys):
-        row_base = iy * row_stride
         for ix, x in enumerate(xs):
-            verts.append((x, y, f(x, y)))
+            z = f(x, y)
+            if (not skip_nonfinite) or _is_finite(z):
+                vid[iy][ix] = len(verts)
+                verts.append((x, y, z))
 
-            if ix < x_segments and iy < y_segments:
-                a = row_base + ix
-                b = a + 1
-                c = a + row_stride
-                d = c + 1
-                faces.append((a, c, b))
-                faces.append((b, c, d))
+    for iy in range(y_segments):
+        for ix in range(x_segments):
+            a = vid[iy][ix]
+            b = vid[iy][ix + 1]
+            c = vid[iy + 1][ix]
+            d = vid[iy + 1][ix + 1]
+            if skip_nonfinite and (a < 0 or b < 0 or c < 0 or d < 0):
+                continue
+            faces.append((a, c, b))
+            faces.append((b, c, d))
 
     return Mesh(verts, faces, name=name).compute_normals(True)
 
@@ -233,7 +388,32 @@ def mesh_from_parametric(
     wrap_u: bool = False,
     wrap_v: bool = False,
     name: str = "parametric",
+    skip_nonfinite: bool = True,
 ) -> Mesh:
+    """
+    Build a triangle mesh for a parametric surface.
+
+    Parameters
+    ----------
+    x_expr, y_expr, z_expr:
+        Math expressions using variables u and v.
+    u_range, v_range:
+        Parameter sampling ranges.
+    u_segments, v_segments:
+        Number of intervals in u and v.
+    wrap_u, wrap_v:
+        If True, treats the surface as periodic in that parameter direction and
+        stitches the seam by omitting the last row/column of points.
+        Typical for tori, spheres in uv, etc.
+    skip_nonfinite:
+        If True, samples that produce NaN/Inf are omitted and triangles touching them
+        are skipped (holes).
+
+    Returns
+    -------
+    Mesh:
+        Mesh with computed vertex normals.
+    """
     _require_segments("u_segments", u_segments)
     _require_segments("v_segments", v_segments)
 
@@ -247,21 +427,27 @@ def mesh_from_parametric(
     ucount = u_segments + (0 if wrap_u else 1)
     vcount = v_segments + (0 if wrap_v else 1)
 
-    # Build parameter samples (note: if wrapping, last seam point is omitted)
     us = [u0 + (u1 - u0) * (i / u_segments) for i in range(ucount)]
     vs = [v0 + (v1 - v0) * (j / v_segments) for j in range(vcount)]
 
     verts: List[Vec3] = []
     faces: List[Tri] = []
 
-    for u in us:
-        for v in vs:
-            verts.append((fx(u, v), fy(u, v), fz(u, v)))
+    vid: List[List[int]] = [[-1] * vcount for _ in range(ucount)]
+
+    for i, u in enumerate(us):
+        for j, v in enumerate(vs):
+            x = fx(u, v)
+            y = fy(u, v)
+            z = fz(u, v)
+            if (not skip_nonfinite) or (_is_finite(x) and _is_finite(y) and _is_finite(z)):
+                vid[i][j] = len(verts)
+                verts.append((x, y, z))
 
     def idx(i: int, j: int) -> int:
         ii = (i % u_segments) if wrap_u else i
         jj = (j % v_segments) if wrap_v else j
-        return ii * vcount + jj
+        return vid[ii][jj]
 
     for i in range(u_segments):
         for j in range(v_segments):
@@ -269,6 +455,8 @@ def mesh_from_parametric(
             b = idx(i + 1, j)
             c = idx(i, j + 1)
             d = idx(i + 1, j + 1)
+            if skip_nonfinite and (a < 0 or b < 0 or c < 0 or d < 0):
+                continue
             faces.append((a, b, c))
             faces.append((b, d, c))
 
@@ -277,6 +465,7 @@ def mesh_from_parametric(
 
 # ---------------------------------------------------------
 # 3) Implicit surface: f(x,y,z) = iso (marching tetrahedra)
+#    Improvement: edge-cache keyed by grid corner ids
 # ---------------------------------------------------------
 
 def _lerp(a: float, b: float, t: float) -> float:
@@ -285,7 +474,17 @@ def _lerp(a: float, b: float, t: float) -> float:
 
 def _interp(p0: Vec3, p1: Vec3, v0: float, v1: float, iso: float) -> Vec3:
     dv = v1 - v0
-    t = 0.5 if abs(dv) < 1e-12 else (iso - v0) / dv
+    if abs(dv) < 1e-12:
+        t = 0.5
+    else:
+        t = (iso - v0) / dv
+
+    # clamp improves stability around flat regions / numeric noise
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+
     return (
         _lerp(p0[0], p1[0], t),
         _lerp(p0[1], p1[1], t),
@@ -300,15 +499,37 @@ def mesh_from_implicit(
     resolution: Tuple[int, int, int] = (48, 48, 48),
     iso: float = 0.0,
     name: str = "implicit",
-    weld_eps: Optional[float] = 1e-6,
+    skip_nonfinite: bool = True,
 ) -> Mesh:
     """
     Build an iso-surface mesh for f(x,y,z) = iso using marching tetrahedra.
 
-    Tips:
-      - Higher resolution => smoother but slower.
-      - bounds should fully contain your surface.
-      - weld_eps controls vertex welding during polygonization (None disables).
+    Parameters
+    ----------
+    expr:
+        Math expression using variables x, y, z.
+        Example: "x*x + y*y + z*z - 1"  (sphere)
+    bounds:
+        ((xmin,ymin,zmin),(xmax,ymax,zmax)) sampling volume.
+        Your surface must be inside these bounds.
+    resolution:
+        (nx, ny, nz) number of sample points along each axis.
+        Higher values -> more detail (cost grows ~nx*ny*nz).
+    iso:
+        Extract surface where f(x,y,z) == iso.
+    skip_nonfinite:
+        If True, cubes that touch NaN/Inf samples are ignored.
+
+    Mesh quality notes
+    ------------------
+    This implementation uses an edge-vertex cache keyed by *grid corner IDs*,
+    which significantly reduces cracks and duplicated vertices compared to
+    naive "welding by rounding".
+
+    Returns
+    -------
+    Mesh:
+        Mesh with computed vertex normals.
     """
     f = compile_math_expr(expr, vars=("x", "y", "z"))
 
@@ -321,16 +542,20 @@ def mesh_from_implicit(
     ys = [ymin + (ymax - ymin) * (j / (ny - 1)) for j in range(ny)]
     zs = [zmin + (zmax - zmin) * (k / (nz - 1)) for k in range(nz)]
 
-    # Flattened scalar field: index = (i*ny + j)*nz + k
-    def vidx(i: int, j: int, k: int) -> int:
+    def gidx(i: int, j: int, k: int) -> int:
+        # Flattened scalar field: index = (i*ny + j)*nz + k
         return (i * ny + j) * nz + k
 
     vals = [0.0] * (nx * ny * nz)
+    finite = [True] * (nx * ny * nz)
+
     for i, x in enumerate(xs):
         for j, y in enumerate(ys):
             base = (i * ny + j) * nz
             for k, z in enumerate(zs):
-                vals[base + k] = f(x, y, z)
+                v = f(x, y, z)
+                vals[base + k] = v
+                finite[base + k] = _is_finite(v)
 
     corner_off = [
         (0, 0, 0),
@@ -356,40 +581,57 @@ def mesh_from_implicit(
     verts: List[Vec3] = []
     faces: List[Tri] = []
 
-    def add_v(p: Vec3) -> int:
+    # Edge cache: (gridCornerIdA, gridCornerIdB) -> vertexIndex
+    edge_cache: Dict[Tuple[int, int], int] = {}
+
+    def add_vert(p: Vec3) -> int:
         verts.append(p)
         return len(verts) - 1
 
-    cache: Dict[Tuple[int, int, int], int] = {}
-
-    def add_v_cached(p: Vec3) -> int:
-        if weld_eps is None:
-            return add_v(p)
-        eps = weld_eps
-        key = (round(p[0] / eps), round(p[1] / eps), round(p[2] / eps))
-        hit = cache.get(key)
+    def edge_vertex(
+        id0: int,
+        id1: int,
+        p0: Vec3,
+        p1: Vec3,
+        v0: float,
+        v1: float,
+    ) -> int:
+        key = (id0, id1) if id0 < id1 else (id1, id0)
+        hit = edge_cache.get(key)
         if hit is not None:
             return hit
-        i = add_v(p)
-        cache[key] = i
-        return i
+        p = _interp(p0, p1, v0, v1, iso)
+        vi = add_vert(p)
+        edge_cache[key] = vi
+        return vi
 
     for i in range(nx - 1):
         for j in range(ny - 1):
             for k in range(nz - 1):
-                # Gather cube corners
+                # Gather cube corners (positions, scalar values, and global ids)
                 P: List[Vec3] = []
                 V: List[float] = []
+                ID: List[int] = []
+
+                ok = True
                 for dx, dy, dz in corner_off:
                     ii, jj, kk = i + dx, j + dy, k + dz
+                    gid = gidx(ii, jj, kk)
+                    if skip_nonfinite and not finite[gid]:
+                        ok = False
+                        break
+                    ID.append(gid)
                     P.append((xs[ii], ys[jj], zs[kk]))
-                    V.append(vals[vidx(ii, jj, kk)])
+                    V.append(vals[gid])
+
+                if not ok:
+                    continue
 
                 # Polygonize each tetrahedron
                 for a, b, c, d in tets:
-                    ids = (a, b, c, d)
-                    pv = (P[ids[0]], P[ids[1]], P[ids[2]], P[ids[3]])
-                    sv = (V[ids[0]], V[ids[1]], V[ids[2]], V[ids[3]])
+                    pv = (P[a], P[b], P[c], P[d])
+                    sv = (V[a], V[b], V[c], V[d])
+                    iv = (ID[a], ID[b], ID[c], ID[d])
 
                     inside = (sv[0] < iso, sv[1] < iso, sv[2] < iso, sv[3] < iso)
                     n_in = int(inside[0]) + int(inside[1]) + int(inside[2]) + int(inside[3])
@@ -401,40 +643,69 @@ def mesh_from_implicit(
                     out_idx = [q for q in range(4) if not inside[q]]
 
                     if n_in == 1:
-                        vi = in_idx[0]
+                        vi_in = in_idx[0]
                         o0, o1, o2 = out_idx
-                        p0 = _interp(pv[vi], pv[o0], sv[vi], sv[o0], iso)
-                        p1 = _interp(pv[vi], pv[o1], sv[vi], sv[o1], iso)
-                        p2 = _interp(pv[vi], pv[o2], sv[vi], sv[o2], iso)
-                        i0 = add_v_cached(p0)
-                        i1 = add_v_cached(p1)
-                        i2 = add_v_cached(p2)
+                        i0 = edge_vertex(iv[vi_in], iv[o0], pv[vi_in], pv[o0], sv[vi_in], sv[o0])
+                        i1 = edge_vertex(iv[vi_in], iv[o1], pv[vi_in], pv[o1], sv[vi_in], sv[o1])
+                        i2 = edge_vertex(iv[vi_in], iv[o2], pv[vi_in], pv[o2], sv[vi_in], sv[o2])
                         faces.append((i0, i1, i2))
 
                     elif n_in == 3:
-                        vo = out_idx[0]
+                        vi_out = out_idx[0]
                         i0, i1, i2 = in_idx
-                        p0 = _interp(pv[vo], pv[i0], sv[vo], sv[i0], iso)
-                        p1 = _interp(pv[vo], pv[i1], sv[vo], sv[i1], iso)
-                        p2 = _interp(pv[vo], pv[i2], sv[vo], sv[i2], iso)
-                        a0 = add_v_cached(p0)
-                        a1 = add_v_cached(p1)
-                        a2 = add_v_cached(p2)
+                        a0 = edge_vertex(iv[vi_out], iv[i0], pv[vi_out], pv[i0], sv[vi_out], sv[i0])
+                        a1 = edge_vertex(iv[vi_out], iv[i1], pv[vi_out], pv[i1], sv[vi_out], sv[i1])
+                        a2 = edge_vertex(iv[vi_out], iv[i2], pv[vi_out], pv[i2], sv[vi_out], sv[i2])
                         faces.append((a0, a2, a1))  # flipped orientation
 
                     else:
                         # n_in == 2 => quad => 2 triangles
                         i0, i1 = in_idx
                         o0, o1 = out_idx
-                        p0 = _interp(pv[i0], pv[o0], sv[i0], sv[o0], iso)
-                        p1 = _interp(pv[i0], pv[o1], sv[i0], sv[o1], iso)
-                        p2 = _interp(pv[i1], pv[o0], sv[i1], sv[o0], iso)
-                        p3 = _interp(pv[i1], pv[o1], sv[i1], sv[o1], iso)
-                        a0 = add_v_cached(p0)
-                        a1 = add_v_cached(p1)
-                        a2 = add_v_cached(p2)
-                        a3 = add_v_cached(p3)
+                        a0 = edge_vertex(iv[i0], iv[o0], pv[i0], pv[o0], sv[i0], sv[o0])
+                        a1 = edge_vertex(iv[i0], iv[o1], pv[i0], pv[o1], sv[i0], sv[o1])
+                        a2 = edge_vertex(iv[i1], iv[o0], pv[i1], pv[o0], sv[i1], sv[o0])
+                        a3 = edge_vertex(iv[i1], iv[o1], pv[i1], pv[o1], sv[i1], sv[o1])
                         faces.append((a0, a1, a2))
                         faces.append((a2, a1, a3))
 
     return Mesh(verts, faces, name=name).compute_normals(True)
+
+
+def mesh_from_implicit_cell_size(
+    expr: str,
+    *,
+    bounds: Tuple[Vec3, Vec3],
+    cell_size: float,
+    iso: float = 0.0,
+    name: str = "implicit",
+    min_resolution: int = 12,
+    max_resolution: int = 256,
+    skip_nonfinite: bool = True,
+) -> Mesh:
+    """
+    Convenience wrapper around mesh_from_implicit() that chooses resolution from a
+    desired world-space grid cell size.
+
+    Example:
+        mesh = mesh_from_implicit_cell_size(
+            "x*x + y*y + z*z - 1",
+            bounds=((-1.3,-1.3,-1.3),(1.3,1.3,1.3)),
+            cell_size=0.03,
+            max_resolution=200
+        )
+    """
+    res = resolution_from_cell_size(
+        bounds,
+        cell_size,
+        min_resolution=min_resolution,
+        max_resolution=max_resolution,
+    )
+    return mesh_from_implicit(
+        expr,
+        bounds=bounds,
+        resolution=res,
+        iso=iso,
+        name=name,
+        skip_nonfinite=skip_nonfinite,
+    )
