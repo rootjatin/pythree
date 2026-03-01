@@ -1,5 +1,7 @@
 # pythree
 Python package for making geometric shapes obj file and for 3d plotting and 3d obj file 
+
+Pypi : https://pypi.org/project/pythree/
 # pythree (pythree)
 
 **pythree** (aka **pythreemaker**) is a Python package for generating simple 3D geometric meshes and exporting them as **Wavefront `.obj`** files.
