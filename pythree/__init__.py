@@ -10,7 +10,7 @@ A lightweight 3D geometry / mesh package with helpers for:
 - vector and mesh utilities
 """
 
-from .sphere import Mesh
+from .mesh import Mesh
 from .equations import (
     CompiledMathExpr,
     compile_math_expr,
@@ -58,10 +58,7 @@ from .utils import (
 __version__ = "0.1.0"
 
 __all__ = [
-    # core mesh type
     "Mesh",
-
-    # equations
     "CompiledMathExpr",
     "compile_math_expr",
     "segments_from_step",
@@ -70,8 +67,6 @@ __all__ = [
     "mesh_from_parametric",
     "mesh_from_implicit",
     "mesh_from_implicit_cell_size",
-
-    # vector utils
     "vec_add",
     "vec_sub",
     "vec_mul",
@@ -82,19 +77,13 @@ __all__ = [
     "distance",
     "normalize",
     "lerp",
-
-    # triangle utils
     "triangle_normal",
     "triangle_area",
     "triangle_centroid",
-
-    # bounds utils
     "bounds_from_points",
     "bounds_union",
     "bounds_size",
     "bounds_center",
-
-    # mesh utils
     "mesh_bounds",
     "mesh_centroid",
     "mesh_surface_area",
