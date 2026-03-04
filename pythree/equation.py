@@ -1,20 +1,11 @@
 # pythree/equations.py
 from __future__ import annotations
 
-import ast
-import math
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
-
-from .sphere import Mesh  # type: ignore
-
-Vec3 = Tuple[float, float, float]
-Tri = Tuple[int, int, int]
-
-
 """
-This module provides utilities to build triangle meshes from math expressions:
+Utilities to build triangle meshes from math expressions.
 
+Supported surface types
+-----------------------
 1) Heightfield surface:
       z = f(x, y)
 
@@ -28,12 +19,10 @@ This module provides utilities to build triangle meshes from math expressions:
 
 Expressions are compiled using a strict AST validator so you can accept user input
 without allowing arbitrary Python execution. Only a small set of math functions and
-constants are allowed (see _ALLOWED_FUNCS/_ALLOWED_CONSTS).
+constants are allowed.
 
-------------------------------------------------------------
 Choosing resolution / segments
-------------------------------------------------------------
-
+------------------------------
 Mesh quality is driven primarily by sampling density:
 
 - Heightfield: x_segments, y_segments
@@ -43,21 +32,33 @@ Mesh quality is driven primarily by sampling density:
 For implicit surfaces, increasing nx/ny/nz improves detail but cost grows ~O(nx*ny*nz).
 Doubling each axis increases work about 8x.
 
-To make it easier to choose, use:
+Helpers:
     resolution_from_cell_size(bounds, cell_size)
-
-Example:
-    bounds = ((-1.5, -1.5, -1.5), (1.5, 1.5, 1.5))
-    res = resolution_from_cell_size(bounds, cell_size=0.04, max_resolution=160)
-    mesh = mesh_from_implicit(expr, bounds=bounds, resolution=res)
-
-Or simply:
-    mesh = mesh_from_implicit_cell_size(expr, bounds=bounds, cell_size=0.04)
-
-For heightfields/parametric meshes, use:
-    segments_from_step((a,b), step)
-to choose segments such that adjacent samples are about 'step' apart in parameter units.
+    segments_from_step((a, b), step)
 """
+
+import ast
+import math
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Sequence, Tuple
+
+from .mesh import Mesh
+
+Vec3 = Tuple[float, float, float]
+Tri = Tuple[int, int, int]
+
+__all__ = [
+    "Vec3",
+    "Tri",
+    "CompiledMathExpr",
+    "compile_math_expr",
+    "segments_from_step",
+    "resolution_from_cell_size",
+    "mesh_from_heightfield",
+    "mesh_from_parametric",
+    "mesh_from_implicit",
+    "mesh_from_implicit_cell_size",
+]
 
 
 # -----------------------------
@@ -108,7 +109,7 @@ _ALLOWED_NODE_TYPES = (
     ast.Call,
     ast.Name,
     ast.Load,
-    ast.Constant,  # py3.8+
+    ast.Constant,
 )
 
 
@@ -122,9 +123,8 @@ class _MathExprValidator(ast.NodeVisitor):
         super().generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
-        # Only allow f(x) where f is a simple name in _ALLOWED_FUNCS
         if not isinstance(node.func, ast.Name):
-            raise ValueError("Only simple function calls are allowed (e.g., sin(x))")
+            raise ValueError("Only simple function calls are allowed (e.g. sin(x))")
         if node.func.id not in _ALLOWED_FUNCS:
             raise ValueError(f"Function not allowed: {node.func.id}")
         if node.keywords:
@@ -142,7 +142,6 @@ class _MathExprValidator(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Constant(self, node: ast.Constant) -> None:
-        # Only allow numeric constants
         if not isinstance(node.value, (int, float)):
             raise ValueError(
                 f"Only numeric constants are allowed (got {type(node.value).__name__})"
@@ -153,10 +152,7 @@ class _MathExprValidator(ast.NodeVisitor):
 @dataclass(frozen=True)
 class CompiledMathExpr:
     """
-    A validated expression compiled into a lambda for fast repeated evaluation.
-
-    - Supports positional calls in the declared var order
-    - Supports keyword calls for clarity
+    A validated expression compiled into a callable for repeated evaluation.
 
     Example:
         f = compile_math_expr("sin(x) + y*y", vars=("x", "y"))
@@ -180,7 +176,8 @@ class CompiledMathExpr:
         else:
             if len(args) != len(self.vars):
                 raise TypeError(
-                    f"Expected {len(self.vars)} args ({', '.join(self.vars)}), got {len(args)}"
+                    f"Expected {len(self.vars)} args ({', '.join(self.vars)}), "
+                    f"got {len(args)}"
                 )
             args = tuple(float(a) for a in args)
 
@@ -205,7 +202,6 @@ def compile_math_expr(expr: str, *, vars: Sequence[str]) -> CompiledMathExpr:
     tree = ast.parse(expr, mode="eval")
     _MathExprValidator(vars).visit(tree)
 
-    # Compile to a lambda for speed (avoids per-sample eval + dict creation).
     arglist = ", ".join(vars)
     src = f"lambda {arglist}: ({expr})"
 
@@ -213,12 +209,12 @@ def compile_math_expr(expr: str, *, vars: Sequence[str]) -> CompiledMathExpr:
     base_scope.update(_ALLOWED_FUNCS)
     base_scope.update(_ALLOWED_CONSTS)
 
-    fn = eval(src, base_scope, {})  # safe: AST validated + builtins removed
+    fn = eval(src, base_scope, {})
     return CompiledMathExpr(expr=expr, vars=tuple(vars), _fn=fn)
 
 
 # -------------------------
-# Resolution helper methods
+# Resolution helpers
 # -------------------------
 
 def segments_from_step(
@@ -229,15 +225,16 @@ def segments_from_step(
     max_segments: int = 4096,
 ) -> int:
     """
-    Pick a segment count so adjacent samples are about 'step' apart in parameter units.
+    Pick a segment count so adjacent samples are about `step` apart.
 
     Example:
         x_segments = segments_from_step((-2.0, 2.0), step=0.02)
     """
     a, b = r
-    length = abs(b - a)
     if step <= 0:
         raise ValueError("step must be > 0")
+
+    length = abs(b - a)
     n = int(math.ceil(length / step))
     n = max(min_segments, n)
     n = min(max_segments, n)
@@ -252,18 +249,13 @@ def resolution_from_cell_size(
     max_resolution: int = 256,
 ) -> Tuple[int, int, int]:
     """
-    Pick (nx, ny, nz) for implicit meshing so grid cell edges are roughly 'cell_size'
-    in world-space units.
-
-    - nx/ny/nz are clamped to [min_resolution, max_resolution]
-    - Always returns at least (2,2,2)
-
-    Example:
-        res = resolution_from_cell_size(((-1,-1,-1),(1,1,1)), cell_size=0.03, max_resolution=200)
+    Pick (nx, ny, nz) for implicit meshing so grid cell edges are roughly
+    `cell_size` in world-space units.
     """
-    (xmin, ymin, zmin), (xmax, ymax, zmax) = bounds
     if cell_size <= 0:
         raise ValueError("cell_size must be > 0")
+
+    (xmin, ymin, zmin), (xmax, ymax, zmax) = bounds
 
     lx = abs(xmax - xmin)
     ly = abs(ymax - ymin)
@@ -281,7 +273,7 @@ def resolution_from_cell_size(
 
 
 # -------------------------
-# Small helpers
+# Internal helpers
 # -------------------------
 
 def _require_segments(name: str, n: int) -> None:
@@ -290,7 +282,6 @@ def _require_segments(name: str, n: int) -> None:
 
 
 def _linspace(a: float, b: float, segments: int) -> List[float]:
-    # segments = number of intervals; points = segments + 1
     step = (b - a) / segments
     return [a + i * step for i in range(segments + 1)]
 
@@ -299,8 +290,28 @@ def _is_finite(x: float) -> bool:
     return math.isfinite(x) and not math.isnan(x)
 
 
+def _lerp(a: float, b: float, t: float) -> float:
+    return a + (b - a) * t
+
+
+def _interp(p0: Vec3, p1: Vec3, v0: float, v1: float, iso: float) -> Vec3:
+    dv = v1 - v0
+    if abs(dv) < 1e-12:
+        t = 0.5
+    else:
+        t = (iso - v0) / dv
+
+    t = max(0.0, min(1.0, t))
+
+    return (
+        _lerp(p0[0], p1[0], t),
+        _lerp(p0[1], p1[1], t),
+        _lerp(p0[2], p1[2], t),
+    )
+
+
 # -------------------------
-# 1) Heightfield: z = f(x,y)
+# 1) Heightfield: z = f(x, y)
 # -------------------------
 
 def mesh_from_heightfield(
@@ -314,41 +325,19 @@ def mesh_from_heightfield(
     skip_nonfinite: bool = True,
 ) -> Mesh:
     """
-    Build a triangle mesh for a heightfield z = f(x,y).
-
-    Parameters
-    ----------
-    expr:
-        Math expression using variables x and y.
-        Example: "sin(x) * cos(y)" or "x*x - y*y".
-    x_range, y_range:
-        Sampling ranges for x and y.
-    x_segments, y_segments:
-        Number of intervals along each axis (points = segments + 1).
-        Higher values -> denser mesh.
-    skip_nonfinite:
-        If True, triangles touching NaN/Inf samples are omitted, producing holes
-        instead of exploding geometry.
-
-    Returns
-    -------
-    Mesh:
-        Mesh with computed vertex normals.
+    Build a triangle mesh for a heightfield z = f(x, y).
     """
     _require_segments("x_segments", x_segments)
     _require_segments("y_segments", y_segments)
 
     f = compile_math_expr(expr, vars=("x", "y"))
 
-    xs0, xs1 = x_range
-    ys0, ys1 = y_range
-    xs = _linspace(xs0, xs1, x_segments)
-    ys = _linspace(ys0, ys1, y_segments)
+    xs = _linspace(x_range[0], x_range[1], x_segments)
+    ys = _linspace(y_range[0], y_range[1], y_segments)
 
     verts: List[Vec3] = []
     faces: List[Tri] = []
 
-    # Vertex id grid; -1 means "invalid"
     vid: List[List[int]] = [[-1] * (x_segments + 1) for _ in range(y_segments + 1)]
 
     for iy, y in enumerate(ys):
@@ -364,8 +353,10 @@ def mesh_from_heightfield(
             b = vid[iy][ix + 1]
             c = vid[iy + 1][ix]
             d = vid[iy + 1][ix + 1]
+
             if skip_nonfinite and (a < 0 or b < 0 or c < 0 or d < 0):
                 continue
+
             faces.append((a, c, b))
             faces.append((b, c, d))
 
@@ -373,7 +364,7 @@ def mesh_from_heightfield(
 
 
 # ---------------------------------------------------
-# 2) Parametric surface: x(u,v), y(u,v), z(u,v)
+# 2) Parametric surface: x(u, v), y(u, v), z(u, v)
 # ---------------------------------------------------
 
 def mesh_from_parametric(
@@ -392,27 +383,6 @@ def mesh_from_parametric(
 ) -> Mesh:
     """
     Build a triangle mesh for a parametric surface.
-
-    Parameters
-    ----------
-    x_expr, y_expr, z_expr:
-        Math expressions using variables u and v.
-    u_range, v_range:
-        Parameter sampling ranges.
-    u_segments, v_segments:
-        Number of intervals in u and v.
-    wrap_u, wrap_v:
-        If True, treats the surface as periodic in that parameter direction and
-        stitches the seam by omitting the last row/column of points.
-        Typical for tori, spheres in uv, etc.
-    skip_nonfinite:
-        If True, samples that produce NaN/Inf are omitted and triangles touching them
-        are skipped (holes).
-
-    Returns
-    -------
-    Mesh:
-        Mesh with computed vertex normals.
     """
     _require_segments("u_segments", u_segments)
     _require_segments("v_segments", v_segments)
@@ -440,7 +410,10 @@ def mesh_from_parametric(
             x = fx(u, v)
             y = fy(u, v)
             z = fz(u, v)
-            if (not skip_nonfinite) or (_is_finite(x) and _is_finite(y) and _is_finite(z)):
+
+            if (not skip_nonfinite) or (
+                _is_finite(x) and _is_finite(y) and _is_finite(z)
+            ):
                 vid[i][j] = len(verts)
                 verts.append((x, y, z))
 
@@ -455,8 +428,10 @@ def mesh_from_parametric(
             b = idx(i + 1, j)
             c = idx(i, j + 1)
             d = idx(i + 1, j + 1)
+
             if skip_nonfinite and (a < 0 or b < 0 or c < 0 or d < 0):
                 continue
+
             faces.append((a, b, c))
             faces.append((b, d, c))
 
@@ -464,33 +439,9 @@ def mesh_from_parametric(
 
 
 # ---------------------------------------------------------
-# 3) Implicit surface: f(x,y,z) = iso (marching tetrahedra)
-#    Improvement: edge-cache keyed by grid corner ids
+# 3) Implicit surface: f(x, y, z) = iso
+#    Uses marching tetrahedra + edge cache keyed by grid ids
 # ---------------------------------------------------------
-
-def _lerp(a: float, b: float, t: float) -> float:
-    return a + (b - a) * t
-
-
-def _interp(p0: Vec3, p1: Vec3, v0: float, v1: float, iso: float) -> Vec3:
-    dv = v1 - v0
-    if abs(dv) < 1e-12:
-        t = 0.5
-    else:
-        t = (iso - v0) / dv
-
-    # clamp improves stability around flat regions / numeric noise
-    if t < 0.0:
-        t = 0.0
-    elif t > 1.0:
-        t = 1.0
-
-    return (
-        _lerp(p0[0], p1[0], t),
-        _lerp(p0[1], p1[1], t),
-        _lerp(p0[2], p1[2], t),
-    )
-
 
 def mesh_from_implicit(
     expr: str,
@@ -502,48 +453,20 @@ def mesh_from_implicit(
     skip_nonfinite: bool = True,
 ) -> Mesh:
     """
-    Build an iso-surface mesh for f(x,y,z) = iso using marching tetrahedra.
-
-    Parameters
-    ----------
-    expr:
-        Math expression using variables x, y, z.
-        Example: "x*x + y*y + z*z - 1"  (sphere)
-    bounds:
-        ((xmin,ymin,zmin),(xmax,ymax,zmax)) sampling volume.
-        Your surface must be inside these bounds.
-    resolution:
-        (nx, ny, nz) number of sample points along each axis.
-        Higher values -> more detail (cost grows ~nx*ny*nz).
-    iso:
-        Extract surface where f(x,y,z) == iso.
-    skip_nonfinite:
-        If True, cubes that touch NaN/Inf samples are ignored.
-
-    Mesh quality notes
-    ------------------
-    This implementation uses an edge-vertex cache keyed by *grid corner IDs*,
-    which significantly reduces cracks and duplicated vertices compared to
-    naive "welding by rounding".
-
-    Returns
-    -------
-    Mesh:
-        Mesh with computed vertex normals.
+    Build an iso-surface mesh for f(x, y, z) = iso using marching tetrahedra.
     """
     f = compile_math_expr(expr, vars=("x", "y", "z"))
 
     (xmin, ymin, zmin), (xmax, ymax, zmax) = bounds
     nx, ny, nz = resolution
     if nx < 2 or ny < 2 or nz < 2:
-        raise ValueError("resolution must be at least (2,2,2)")
+        raise ValueError("resolution must be at least (2, 2, 2)")
 
     xs = [xmin + (xmax - xmin) * (i / (nx - 1)) for i in range(nx)]
     ys = [ymin + (ymax - ymin) * (j / (ny - 1)) for j in range(ny)]
     zs = [zmin + (zmax - zmin) * (k / (nz - 1)) for k in range(nz)]
 
     def gidx(i: int, j: int, k: int) -> int:
-        # Flattened scalar field: index = (i*ny + j)*nz + k
         return (i * ny + j) * nz + k
 
     vals = [0.0] * (nx * ny * nz)
@@ -568,7 +491,6 @@ def mesh_from_implicit(
         (0, 1, 1),
     ]
 
-    # Split cube into 6 tetrahedra along diagonal (0 -> 6)
     tets = [
         (0, 5, 1, 6),
         (0, 1, 2, 6),
@@ -580,8 +502,6 @@ def mesh_from_implicit(
 
     verts: List[Vec3] = []
     faces: List[Tri] = []
-
-    # Edge cache: (gridCornerIdA, gridCornerIdB) -> vertexIndex
     edge_cache: Dict[Tuple[int, int], int] = {}
 
     def add_vert(p: Vec3) -> int:
@@ -597,18 +517,17 @@ def mesh_from_implicit(
         v1: float,
     ) -> int:
         key = (id0, id1) if id0 < id1 else (id1, id0)
-        hit = edge_cache.get(key)
-        if hit is not None:
-            return hit
-        p = _interp(p0, p1, v0, v1, iso)
-        vi = add_vert(p)
+        cached = edge_cache.get(key)
+        if cached is not None:
+            return cached
+
+        vi = add_vert(_interp(p0, p1, v0, v1, iso))
         edge_cache[key] = vi
         return vi
 
     for i in range(nx - 1):
         for j in range(ny - 1):
             for k in range(nz - 1):
-                # Gather cube corners (positions, scalar values, and global ids)
                 P: List[Vec3] = []
                 V: List[float] = []
                 ID: List[int] = []
@@ -627,14 +546,13 @@ def mesh_from_implicit(
                 if not ok:
                     continue
 
-                # Polygonize each tetrahedron
                 for a, b, c, d in tets:
                     pv = (P[a], P[b], P[c], P[d])
                     sv = (V[a], V[b], V[c], V[d])
                     iv = (ID[a], ID[b], ID[c], ID[d])
 
                     inside = (sv[0] < iso, sv[1] < iso, sv[2] < iso, sv[3] < iso)
-                    n_in = int(inside[0]) + int(inside[1]) + int(inside[2]) + int(inside[3])
+                    n_in = sum(int(flag) for flag in inside)
 
                     if n_in == 0 or n_in == 4:
                         continue
@@ -645,27 +563,42 @@ def mesh_from_implicit(
                     if n_in == 1:
                         vi_in = in_idx[0]
                         o0, o1, o2 = out_idx
-                        i0 = edge_vertex(iv[vi_in], iv[o0], pv[vi_in], pv[o0], sv[vi_in], sv[o0])
-                        i1 = edge_vertex(iv[vi_in], iv[o1], pv[vi_in], pv[o1], sv[vi_in], sv[o1])
-                        i2 = edge_vertex(iv[vi_in], iv[o2], pv[vi_in], pv[o2], sv[vi_in], sv[o2])
+
+                        i0 = edge_vertex(
+                            iv[vi_in], iv[o0], pv[vi_in], pv[o0], sv[vi_in], sv[o0]
+                        )
+                        i1 = edge_vertex(
+                            iv[vi_in], iv[o1], pv[vi_in], pv[o1], sv[vi_in], sv[o1]
+                        )
+                        i2 = edge_vertex(
+                            iv[vi_in], iv[o2], pv[vi_in], pv[o2], sv[vi_in], sv[o2]
+                        )
                         faces.append((i0, i1, i2))
 
                     elif n_in == 3:
                         vi_out = out_idx[0]
                         i0, i1, i2 = in_idx
-                        a0 = edge_vertex(iv[vi_out], iv[i0], pv[vi_out], pv[i0], sv[vi_out], sv[i0])
-                        a1 = edge_vertex(iv[vi_out], iv[i1], pv[vi_out], pv[i1], sv[vi_out], sv[i1])
-                        a2 = edge_vertex(iv[vi_out], iv[i2], pv[vi_out], pv[i2], sv[vi_out], sv[i2])
-                        faces.append((a0, a2, a1))  # flipped orientation
+
+                        a0 = edge_vertex(
+                            iv[vi_out], iv[i0], pv[vi_out], pv[i0], sv[vi_out], sv[i0]
+                        )
+                        a1 = edge_vertex(
+                            iv[vi_out], iv[i1], pv[vi_out], pv[i1], sv[vi_out], sv[i1]
+                        )
+                        a2 = edge_vertex(
+                            iv[vi_out], iv[i2], pv[vi_out], pv[i2], sv[vi_out], sv[i2]
+                        )
+                        faces.append((a0, a2, a1))
 
                     else:
-                        # n_in == 2 => quad => 2 triangles
                         i0, i1 = in_idx
                         o0, o1 = out_idx
+
                         a0 = edge_vertex(iv[i0], iv[o0], pv[i0], pv[o0], sv[i0], sv[o0])
                         a1 = edge_vertex(iv[i0], iv[o1], pv[i0], pv[o1], sv[i0], sv[o1])
                         a2 = edge_vertex(iv[i1], iv[o0], pv[i1], pv[o0], sv[i1], sv[o0])
                         a3 = edge_vertex(iv[i1], iv[o1], pv[i1], pv[o1], sv[i1], sv[o1])
+
                         faces.append((a0, a1, a2))
                         faces.append((a2, a1, a3))
 
@@ -684,18 +617,10 @@ def mesh_from_implicit_cell_size(
     skip_nonfinite: bool = True,
 ) -> Mesh:
     """
-    Convenience wrapper around mesh_from_implicit() that chooses resolution from a
-    desired world-space grid cell size.
-
-    Example:
-        mesh = mesh_from_implicit_cell_size(
-            "x*x + y*y + z*z - 1",
-            bounds=((-1.3,-1.3,-1.3),(1.3,1.3,1.3)),
-            cell_size=0.03,
-            max_resolution=200
-        )
+    Convenience wrapper around mesh_from_implicit() that chooses resolution from
+    a desired world-space grid cell size.
     """
-    res = resolution_from_cell_size(
+    resolution = resolution_from_cell_size(
         bounds,
         cell_size,
         min_resolution=min_resolution,
@@ -704,7 +629,7 @@ def mesh_from_implicit_cell_size(
     return mesh_from_implicit(
         expr,
         bounds=bounds,
-        resolution=res,
+        resolution=resolution,
         iso=iso,
         name=name,
         skip_nonfinite=skip_nonfinite,
