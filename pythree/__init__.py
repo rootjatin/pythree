@@ -10,7 +10,18 @@ A lightweight 3D geometry / mesh package with helpers for:
 - vector and mesh utilities
 """
 
+from __future__ import annotations
+
+__version__ = "0.1.0"
+
+# -------------------------
+# Core types
+# -------------------------
 from .mesh import Mesh
+
+# -------------------------
+# Equations / surface builders
+# -------------------------
 from .equations import (
     CompiledMathExpr,
     compile_math_expr,
@@ -21,6 +32,10 @@ from .equations import (
     mesh_from_implicit,
     mesh_from_implicit_cell_size,
 )
+
+# -------------------------
+# Utilities
+# -------------------------
 from .utils import (
     vec_add,
     vec_sub,
@@ -55,10 +70,11 @@ from .utils import (
     print_mesh_stats,
 )
 
-__version__ = "0.1.0"
-
-__all__ = [
+# Explicit export list (public API)
+_PUBLIC = [
+    # core
     "Mesh",
+    # equations
     "CompiledMathExpr",
     "compile_math_expr",
     "segments_from_step",
@@ -67,6 +83,7 @@ __all__ = [
     "mesh_from_parametric",
     "mesh_from_implicit",
     "mesh_from_implicit_cell_size",
+    # utils (vector)
     "vec_add",
     "vec_sub",
     "vec_mul",
@@ -77,13 +94,16 @@ __all__ = [
     "distance",
     "normalize",
     "lerp",
+    # utils (triangle)
     "triangle_normal",
     "triangle_area",
     "triangle_centroid",
+    # utils (bounds)
     "bounds_from_points",
     "bounds_union",
     "bounds_size",
     "bounds_center",
+    # utils (mesh)
     "mesh_bounds",
     "mesh_centroid",
     "mesh_surface_area",
@@ -99,3 +119,5 @@ __all__ = [
     "unique_edges",
     "print_mesh_stats",
 ]
+
+__all__ = tuple(_PUBLIC)
