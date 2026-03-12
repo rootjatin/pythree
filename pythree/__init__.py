@@ -32,7 +32,15 @@ from .equations import (
     mesh_from_implicit,
     mesh_from_implicit_cell_size,
 )
-
+from .material import (
+    ColorRGB,
+    ColorRGBA,
+    rgb,
+    rgba,
+    hex_to_rgb,
+    hex_to_rgba,
+    Material,
+)
 # -------------------------
 # Utilities
 # -------------------------
@@ -118,6 +126,14 @@ _PUBLIC = [
     "remove_degenerate_faces",
     "unique_edges",
     "print_mesh_stats",
+    "ColorRGB",
+    "ColorRGBA",
+    "rgb",
+    "rgba",
+    "hex_to_rgb",
+    "hex_to_rgba",
+    "Material",
 ]
 
 __all__ = tuple(_PUBLIC)
+
