@@ -389,20 +389,20 @@ I would **not** currently use it as:
 - a stable all-in-one 3D framework
 
 ---
+<br>
+Final recommendation
 
-## Final recommendation
+To get the most out of this package:
 
-If you want to work with this package successfully:
+Install it from source rather than relying on a packaged release.
+Import functionality directly from the relevant submodules.
+Start with the equation-based mesh generators, which are the library's strongest feature.
+Inspect and manipulate the generated meshes using pythree.mesh and pythree.utils.
+If needed, export meshes using a simple custom OBJ writer.
 
-1. install from source
-2. import directly from submodules
-3. use the equation-based mesh generators first
-4. inspect the returned mesh through `pythree.mesh` and `pythree.utils`
-5. export with a tiny manual OBJ writer when needed
+In summary:
 
-In one sentence:
-
-> `pythree` is a small equation-driven mesh generator with useful ideas, but the repository structure is inconsistent, so you should use only the clean submodules directly.
+pythree is a lightweight, equation-driven mesh generation library with some well-designed components, but its overall package structure is inconsistent. For the best experience, install it from source and work directly with its stable submodules.
 
 ---
 
